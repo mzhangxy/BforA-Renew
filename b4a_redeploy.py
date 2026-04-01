@@ -1,15 +1,18 @@
 import os
+import base64
 import requests
+from nacl.encoding import Base64Encoder
+from nacl.public import PublicKey, SealedBox
 from seleniumbase import SB
 
-EMAIL = os.environ["B4A_EMAIL"]
-PASSWORD = os.environ["B4A_PASSWORD"]
+CONNECT_SID = os.environ["CONNECT_SID"]
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
+GH_REPO = os.environ.get("GITHUB_REPOSITORY", "")  # Actions 内置变量，自动注入
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 
 APP_ID = "90148b3e-2353-459f-a1f8-e34377e389bc"
 APP_URL = f"https://containers.back4app.com/apps/{APP_ID}"
-LOGIN_URL = f"https://www.back4app.com/login?return-url=https%3A%2F%2Fcontainers.back4app.com%2Fapps%2F{APP_ID}"
 PROXY = "http://127.0.0.1:8080"
 
 def notify(msg):
@@ -23,6 +26,48 @@ def notify(msg):
         except Exception as e:
             print(f"TG notify failed: {e}")
 
+def update_github_secret(secret_name, secret_value):
+    """通过 GitHub API 更新 repo secret"""
+    if not GH_TOKEN or not GH_REPO:
+        print("GH_TOKEN or GITHUB_REPOSITORY not available, skipping secret update")
+        return False
+    try:
+        headers = {
+            "Authorization": f"token {GH_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        # 获取仓库公钥
+        pk_resp = requests.get(
+            f"https://api.github.com/repos/{GH_REPO}/actions/secrets/public-key",
+            headers=headers,
+            timeout=10
+        )
+        pk_resp.raise_for_status()
+        pk_data = pk_resp.json()
+
+        # 加密 secret 值
+        public_key = PublicKey(pk_data["key"].encode(), encoder=Base64Encoder)
+        sealed_box = SealedBox(public_key)
+        encrypted = sealed_box.encrypt(secret_value.encode())
+        encrypted_b64 = base64.b64encode(encrypted).decode()
+
+        # 写入 secret
+        put_resp = requests.put(
+            f"https://api.github.com/repos/{GH_REPO}/actions/secrets/{secret_name}",
+            headers=headers,
+            json={
+                "encrypted_value": encrypted_b64,
+                "key_id": pk_data["key_id"]
+            },
+            timeout=10
+        )
+        put_resp.raise_for_status()
+        print(f"GitHub secret '{secret_name}' updated successfully")
+        return True
+    except Exception as e:
+        print(f"Failed to update GitHub secret: {e}")
+        return False
+
 def find_button_by_text(sb, keyword):
     """遍历所有 button，小写包含匹配关键字"""
     buttons = sb.find_elements("button")
@@ -31,97 +76,42 @@ def find_button_by_text(sb, keyword):
             return btn
     return None
 
-def find_button_exact_text(sb, text):
-    """完全匹配按钮文字（去除首尾空格后比较，忽略大小写）"""
-    buttons = sb.find_elements("button")
-    for btn in buttons:
-        if btn.text.strip().lower() == text.strip().lower():
-            return btn
-    return None
-
-def find_button_xpath(sb, keyword):
-    """XPath 包含匹配兜底"""
-    try:
-        return sb.find_element(
-            f'//button[contains(translate(text(),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"{keyword.lower()}")]'
-        )
-    except:
-        return None
-
-def click_button_by_text(sb, keyword):
-    """找到包含关键字的按钮并用 JS click 点击，避免 UC 模式 arguments 问题"""
-    buttons = sb.find_elements("button")
-    for i, btn in enumerate(buttons):
-        if keyword.lower() in btn.text.lower():
-            sb.execute_script(
-                "var btns = document.querySelectorAll('button');"
-                f"btns[{i}].scrollIntoView(true);"
-                f"btns[{i}].click();"
-            )
-            return True
-    return False
-
 def run():
     with SB(uc=True, headless=True, proxy=PROXY) as sb:
 
-        # ── 直接打开带 return-url 的登录页 ──
-        print(f"Navigating to login page: {LOGIN_URL}")
-        sb.open(LOGIN_URL)
-        sb.sleep(3)
-        sb.save_screenshot("login_page.png")
-        print("Screenshot saved: login_page.png")
+        # ── 先打开目标域名，再注入 cookie ──
+        print("Opening app domain to set cookie...")
+        sb.open("https://containers.back4app.com")
+        sb.sleep(2)
 
-        # ── 填写邮箱和密码 ──
-        sb.wait_for_element("input[placeholder='Email']", timeout=20)
-        sb.type("input[placeholder='Email']", EMAIL)
-        sb.type("input[placeholder='Password']", PASSWORD)
+        # 注入 connect.sid cookie
+        sb.driver.add_cookie({
+            "name": "connect.sid",
+            "value": CONNECT_SID,
+            "domain": "containers.back4app.com",
+            "path": "/",
+            "secure": True,
+            "httpOnly": True
+        })
+        print("Cookie injected, navigating to app page...")
 
-        # ── 点击 Continue 按钮（精确匹配，避免点到 Continue with Google）──
-        print("Looking for Continue button...")
-        clicked = click_button_by_text(sb, "continue")
-        # 但要排除 "Continue with Google/Github"，用精确匹配重新实现
-        # 重写：精确匹配 JS 点击
-        buttons = sb.find_elements("button")
-        continue_index = None
-        for i, btn in enumerate(buttons):
-            if btn.text.strip().lower() == "continue":
-                continue_index = i
-                break
-
-        if continue_index is None:
-            sb.save_screenshot("login_failed.png")
-            msg = "❌ 未找到精确匹配的 Continue 登录按钮，请查看截图"
-            print(msg)
-            notify(msg)
-            raise Exception(msg)
-
-        print(f"Clicking Continue button at index {continue_index}...")
-        sb.execute_script(
-            "var btns = document.querySelectorAll('button');"
-            f"btns[{continue_index}].scrollIntoView(true);"
-            f"btns[{continue_index}].click();"
-        )
+        # ── 跳转到目标 App 页面 ──
+        sb.open(APP_URL)
         sb.sleep(5)
 
-        # ── 登录结果判断 ──
+        # 截图检查是否成功进入
+        sb.save_screenshot("after_cookie.png")
+        print("Screenshot saved: after_cookie.png")
+
+        # ── 判断是否成功到达目标页面 ──
         current_url = sb.get_current_url()
-        print(f"Post-login URL: {current_url}")
+        print(f"Current URL: {current_url}")
 
         if "login" in current_url.lower():
-            sb.save_screenshot("login_failed.png")
-            msg = "❌ 登录失败，仍停留在登录页，请检查邮箱和密码"
+            msg = "❌ Cookie 已失效，已被重定向到登录页，请手动更新 CONNECT_SID secret"
             print(msg)
             notify(msg)
             raise Exception(msg)
-
-        print("Login successful.")
-
-        # ── 判断是否已自动跳转到目标 App 页面 ──
-        if APP_ID not in current_url:
-            print(f"Not redirected automatically, navigating to: {APP_URL}")
-            sb.open(APP_URL)
-            sb.sleep(5)
-            current_url = sb.get_current_url()
 
         if APP_ID not in current_url:
             sb.save_screenshot("wrong_page.png")
@@ -131,6 +121,16 @@ def run():
             raise Exception(msg)
 
         print("Successfully reached target app page.")
+
+        # ── 检查 cookie 是否被服务器刷新，如有则自动更新 secret ──
+        cookies = sb.driver.get_cookies()
+        for cookie in cookies:
+            if cookie["name"] == "connect.sid" and cookie["value"] != CONNECT_SID:
+                print("Detected updated connect.sid, updating GitHub secret...")
+                new_sid = cookie["value"]
+                if update_github_secret("CONNECT_SID", new_sid):
+                    notify("🔄 connect.sid 已自动更新至 GitHub secret")
+                break
 
         # 滚动到底部确保左下角按钮渲染
         sb.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -149,18 +149,6 @@ def run():
                 redeploy_index = i
                 redeploy_text = btn.text.strip()
                 break
-
-        if redeploy_index is None:
-            # XPath 兜底查找
-            try:
-                all_btns = sb.find_elements("button")
-                for i, btn in enumerate(all_btns):
-                    if "redeploy" in btn.text.lower():
-                        redeploy_index = i
-                        redeploy_text = btn.text.strip()
-                        break
-            except:
-                pass
 
         if redeploy_index is None:
             msg = "❌ 未找到 Redeploy App 按钮，可能当前无需部署或页面结构已变化"
