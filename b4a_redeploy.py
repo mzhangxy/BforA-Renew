@@ -47,7 +47,7 @@ def run():
         sb.wait_for_element("input[type='email']", timeout=20)
         sb.type("input[type='email']", EMAIL)
         sb.type("input[type='password']", PASSWORD)
-        sb.click("button[type='submit']")
+        sb.click("button[type='Continue']")
         sb.sleep(5)
 
         # ── 登录结果判断 ──
