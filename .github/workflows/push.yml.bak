@@ -1,0 +1,41 @@
+name: Scheduled Auto Redeploy
+
+on:
+  #schedule:
+    
+    # 每小时运行一次
+    #- cron: "0 * * * *"
+  workflow_dispatch: # 手动触发
+
+jobs:
+  trigger-redeploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 允许 GitHub Actions 推送代码到仓库
+
+    steps:
+      - name: 检出代码 (Checkout)
+        uses: actions/checkout@v4
+
+      - name: 更新触发文件 (Update trigger file)
+        run: |
+          # 建立一个专门用于触发的隐藏文件 .redeploy_trigger
+          echo "Last redeploy triggered at: $(date)" > .redeploy_trigger
+
+      - name: 提交并推送更改 (Commit and Push)
+        run: |
+          # 配置 Git 机器人的身份
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 添加刚才修改的文件并提交
+          git add .redeploy_trigger
+          
+          # 只有在文件真的发生改变时才 commit 和 push
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: auto redeploy trigger [skip ci]"
+            git push
+            echo "✅ 成功推送更改，Back4App 将自动开始重新部署。"
+          else
+            echo "⚠️ 没有文件改变，跳过推送。"
+          fi
